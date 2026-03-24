@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: nexttoppers-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false          # set in Render dashboard
+      - key: OWNER_ID
+        sync: false
+      - key: CHECK_INTERVAL_HOURS
+        value: "24"
+      - key: DB_HOST
+        value: sql200.infinityfree.com
+      - key: DB_PORT
+        value: "3306"
+      - key: DB_USER
+        value: if0_40695956
+      - key: DB_PASSWORD
+        sync: false          # set in Render dashboard
+      - key: DB_NAME
+        value: if0_40695956_nt
