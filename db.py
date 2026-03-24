@@ -11,11 +11,11 @@ from mysql.connector import pooling
 
 # ─────────────── DB CONFIG ───────────────
 DB_CONFIG = {
-    "host":     os.getenv("DB_HOST",     "sql200.infinityfree.com"),
-    "port":     int(os.getenv("DB_PORT", "3306")),
-    "user":     os.getenv("DB_USER",     "if0_40695956"),
+    "host":     os.getenv("DB_HOST",     "mysql-3369278f-cathycarter-c7c2.c.aivencloud.com"),
+    "port":     int(os.getenv("DB_PORT", "11860"),
+    "user":     os.getenv("DB_USER",     "avnadmin"),
     "password": os.getenv("DB_PASSWORD", "yourpassword"),
-    "database": os.getenv("DB_NAME",     "if0_40695956_nt"),
+    "database": os.getenv("DB_NAME",     "defaultdb"),
 }
 # ─────────────────────────────────────────
 
