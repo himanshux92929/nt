@@ -112,7 +112,10 @@ async def api_get(session: aiohttp.ClientSession, url: str) -> dict:
 
 
 def encode_token(url: str) -> str:
-    return base64.b64encode(f"{PLAYER_SECRET}:{url}".encode()).decode()
+    """XOR each character of the URL against the cycling key, then base64-encode."""
+    key    = PLAYER_SECRET
+    xored  = bytes([ord(url[i]) ^ ord(key[i % len(key)]) for i in range(len(url))])
+    return base64.b64encode(xored).decode()
 
 
 def make_player_url(file_url: str) -> str:
@@ -404,7 +407,8 @@ async def post_content(
 ):
     file_url  = detail.get("file_url", "")
     file_type = detail.get("file_type")
-    thumb     = detail.get("thumbnail", "")
+    # Always use the thumbnail returned by content-details API
+    thumb     = (detail.get("thumbnail") or "").strip()
     duration  = detail.get("duration", "")
 
     if not file_url:
@@ -428,11 +432,13 @@ async def post_content(
 
     try:
         if thumb and thumb.startswith("http"):
+            # Always send as photo with the thumbnail from content details
             await app.bot.send_photo(
                 chat_id=channel_id, photo=thumb,
                 caption=caption, reply_markup=kb, parse_mode="HTML",
             )
         else:
+            # No thumbnail available — fall back to plain message
             await app.bot.send_message(
                 chat_id=channel_id, text=caption,
                 reply_markup=kb, parse_mode="HTML",
