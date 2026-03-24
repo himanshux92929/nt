@@ -13,7 +13,7 @@ from mysql.connector import pooling
 DB_CONFIG = {
     "host":     os.getenv("DB_HOST",     "sql200.infinityfree.com"),
     "port":     int(os.getenv("DB_PORT", "3306")),
-    "user":     os.getenv("DB_USER",     "if0_40695956""),
+    "user":     os.getenv("DB_USER",     "if0_40695956"),
     "password": os.getenv("DB_PASSWORD", "yourpassword"),
     "database": os.getenv("DB_NAME",     "if0_40695956_nt""),
 }
