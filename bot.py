@@ -251,6 +251,7 @@ async def cb_course(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⏸ Pause",          callback_data=f"pause:{platform}:{course_id}"),
          InlineKeyboardButton("▶️ Resume",         callback_data=f"resume:{platform}:{course_id}")],
         [InlineKeyboardButton("🔄 Restart (reset sent)", callback_data=f"rst_confirm:{platform}:{course_id}")],
+        [InlineKeyboardButton("⚡ Force Update Now",     callback_data=f"forceupdate:{platform}:{course_id}")],
     ] + back_btn(platform)
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -440,7 +441,89 @@ async def post_content(
         log.error(f"[{platform}] post failed → channel {channel_id}: {e}")
 
 
-async def check_and_post(app: Application):
+async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Immediately run the content check for a single batch and report results."""
+    query = update.callback_query
+    await query.answer("⚡ Starting force update…", show_alert=False)
+    if query.from_user.id != OWNER_ID:
+        return
+
+    _, platform, cid = query.data.split(":")
+    course_id = int(cid)
+    cfg   = pcfg(platform)
+    batch = db.get_batch(platform, course_id)
+
+    if not batch or not batch.get("channel_id"):
+        await query.edit_message_text(
+            f"⚠️ Course {course_id} has no channel linked. Set a channel first.",
+        )
+        return
+
+    channel_id = batch["channel_id"]
+
+    # Edit message to show progress
+    await query.edit_message_text(
+        f"{cfg['emoji']} *{cfg['label']} – Course {course_id}*\n\n"
+        f"⚡ Force update running…\nFetching content list, please wait.",
+        parse_mode="Markdown",
+    )
+
+    posted  = 0
+    skipped = 0
+    errors  = 0
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            files = await fetch_files_recursive(session, platform, course_id)
+
+            for f in files:
+                content_id = f["entity_id"]
+                if db.is_sent(platform, course_id, content_id):
+                    skipped += 1
+                    continue
+
+                detail = await get_content_detail(session, platform, content_id, course_id)
+                if not detail or not detail.get("file_url"):
+                    db.mark_sent(platform, course_id, content_id)
+                    skipped += 1
+                    continue
+
+                await post_content(ctx.application, platform, channel_id, detail, f["title"])
+                db.mark_sent(platform, course_id, content_id)
+                posted += 1
+                await asyncio.sleep(1.2)
+
+    except Exception as e:
+        log.error(f"[{platform}] force update error for course {course_id}: {e}")
+        errors += 1
+
+    # Report result back in the same message
+    status_line = "✅ Done" if not errors else "⚠️ Finished with errors"
+    chan_txt = f"`{channel_id}`"
+
+    kb = [
+        [InlineKeyboardButton("➕ Set Channel",    callback_data=f"setchan:{platform}:{course_id}"),
+         InlineKeyboardButton("➖ Remove Channel", callback_data=f"rmchan:{platform}:{course_id}")],
+        [InlineKeyboardButton("⏸ Pause",          callback_data=f"pause:{platform}:{course_id}"),
+         InlineKeyboardButton("▶️ Resume",         callback_data=f"resume:{platform}:{course_id}")],
+        [InlineKeyboardButton("🔄 Restart (reset sent)", callback_data=f"rst_confirm:{platform}:{course_id}")],
+        [InlineKeyboardButton("⚡ Force Update Now",     callback_data=f"forceupdate:{platform}:{course_id}")],
+    ] + back_btn(platform)
+
+    await query.edit_message_text(
+        f"{cfg['emoji']} *{cfg['label']} – Course {course_id}*\n\n"
+        f"Channel : {chan_txt}\n"
+        f"Status  : {'▶️' if batch.get('status','active') == 'active' else '⏸'} {batch.get('status','active')}\n\n"
+        f"{status_line}\n"
+        f"📤 Posted : {posted}\n"
+        f"⏭ Skipped : {skipped} (already sent)\n"
+        + (f"❌ Errors  : {errors}\n" if errors else ""),
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown",
+    )
+
+
+
     batches = db.get_all_active_batches()
     if not batches:
         log.info("No active batches with channels configured.")
@@ -494,6 +577,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_resume,      pattern=r"^resume:(nt|mj):\d+$"))
     app.add_handler(CallbackQueryHandler(cb_rst_confirm, pattern=r"^rst_confirm:(nt|mj):\d+$"))
     app.add_handler(CallbackQueryHandler(cb_restart,     pattern=r"^restart:(nt|mj):\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_forceupdate, pattern=r"^forceupdate:(nt|mj):\d+$"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_channel_input))
 
