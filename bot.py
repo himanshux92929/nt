@@ -232,7 +232,7 @@
       
       @flask_app.route("/")
       def health():
-          return "OK – Bot is running", 200
+          return "OK – Bot is running hehe", 200
       
       @flask_app.route("/ping")
       def ping():
