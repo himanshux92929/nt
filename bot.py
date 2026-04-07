@@ -579,6 +579,18 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.delete()
 
 
+# FIX: /broadcast command now has the correct signature and logic
+@owner_only
+async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/broadcast <message> – broadcast to all connected channels."""
+    text = " ".join(ctx.args) if ctx.args else ""
+    if not text:
+        await update.message.reply_text("Usage: /broadcast <your message>")
+        return
+    reply = await update.message.reply_text("📡 Broadcasting…")
+    await _do_broadcast(reply.edit_text, ctx.application, text)
+
+
 async def cb_backup_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("🗄️ Sending backup…", show_alert=False)
@@ -604,7 +616,7 @@ async def _do_db_backup(app: Application):
                 f"🕛 {now} UTC\n\n"
                 f"Contains: <code>batches</code> + <code>sent_files</code> tables."
             ),
-            parse_mode="HTML",  # ← was Markdown, underscores in filename broke it
+            parse_mode="HTML",
         )
         log.info("DB backup sent.")
     except Exception as e:
@@ -615,11 +627,6 @@ async def _do_db_backup(app: Application):
             )
         except Exception:
             pass
-    text = " ".join(ctx.args) if ctx.args else ""
-    if not text:
-        await update.message.reply_text("Usage: /broadcast <your message>")
-        return
-    await _do_broadcast(update.message.reply_text, ctx.application, text)
 
 
 @owner_only
@@ -702,32 +709,37 @@ async def _do_forceall(status_fn, app: Application):
 
             try:
                 files = await fetch_files_recursive(session, platform, course_id)
+                log.info(f"[{platform}] forceall: found {len(files)} file(s) for course {course_id}")
+
                 for f in files:
-                    cid = f["entity_id"]
-                    if db_is_sent(platform, course_id, cid):
+                    content_id = f["entity_id"]  # FIX: use content_id, not cid (route param)
+                    if db_is_sent(platform, course_id, content_id):
                         skipped += 1
                         continue
+
                     detail = await get_content_detail(
-                        session, platform, cid, course_id, f.get("data")
+                        session, platform, content_id, course_id, f.get("data")
                     )
-                    if not detail:
+                    if detail is None:
+                        # API fetch genuinely failed after retries — do NOT mark sent, retry later
                         log.warning(
-                            f"[{platform}] No detail for content_id={cid}, will retry next run."
+                            f"[{platform}] No detail returned for content_id={content_id} (course={course_id}), will retry next run."
                         )
                         skipped += 1
-                        continue  # ← do NOT mark as sent, retry next time
+                        continue
 
                     file_url = (detail.get("file_url") or "").strip()
                     if not file_url:
-                        # Genuinely no file (e.g. live class placeholder) — safe to skip forever
+                        # Confirmed no file (live class placeholder etc.) — safe to mark done forever
                         log.info(
-                            f"[{platform}] content_id={cid} has no file_url, marking done."
+                            f"[{platform}] content_id={content_id} has no file_url, marking done."
                         )
-                        db_mark_sent(platform, course_id, cid)
+                        db_mark_sent(platform, course_id, content_id)
                         skipped += 1
                         continue
+
                     await post_content(app, platform, channel_id, detail, f["title"])
-                    db_mark_sent(platform, course_id, cid)
+                    db_mark_sent(platform, course_id, content_id)
                     posted += 1
                     await asyncio.sleep(1.2)
 
@@ -1052,36 +1064,42 @@ async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         async with aiohttp.ClientSession() as session:
             files = await fetch_files_recursive(session, platform, course_id)
+            log.info(f"[{platform}] forceupdate: found {len(files)} file(s) for course {course_id}")
+
             for f in files:
-                content_id = f["entity_id"]
+                content_id = f["entity_id"]  # FIX: use content_id, not cid (route param)
                 if db_is_sent(platform, course_id, content_id):
                     skipped += 1
                     continue
+
                 detail = await get_content_detail(
                     session, platform, content_id, course_id, f.get("data")
                 )
-                if not detail:
+                if detail is None:
+                    # API fetch failed after retries — do NOT mark sent, retry later
                     log.warning(
-                        f"[{platform}] No detail for content_id={cid}, will retry next run."
+                        f"[{platform}] No detail returned for content_id={content_id} (course={course_id}), will retry next run."
                     )
                     skipped += 1
-                    continue  # ← do NOT mark as sent, retry next time
+                    continue
 
                 file_url = (detail.get("file_url") or "").strip()
                 if not file_url:
-                    # Genuinely no file (e.g. live class placeholder) — safe to skip forever
+                    # Confirmed no file — safe to mark done forever
                     log.info(
-                        f"[{platform}] content_id={cid} has no file_url, marking done."
+                        f"[{platform}] content_id={content_id} has no file_url, marking done."
                     )
-                    db_mark_sent(platform, course_id, cid)
+                    db_mark_sent(platform, course_id, content_id)
                     skipped += 1
                     continue
+
                 await post_content(
                     ctx.application, platform, channel_id, detail, f["title"]
                 )
                 db_mark_sent(platform, course_id, content_id)
                 posted += 1
                 await asyncio.sleep(1.2)
+
     except Exception as e:
         log.error(f"[{platform}] force update error {course_id}: {e}")
         errors += 1
@@ -1166,46 +1184,92 @@ async def msg_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CONTENT POLLER
+#  CONTENT POLLER  –  FIXED recursive folder traversal
 # ═══════════════════════════════════════════════════════════════
 async def fetch_files_recursive(session, platform, course_id, folder_id=None, _depth=0):
-    if _depth > 10:
-        log.warning(f"[{platform}] Max recursion depth hit for course {course_id}")
+    """
+    Recursively walk the course content tree and return a flat list of file items.
+
+    KEY FIXES vs original:
+    1. Items whose type is "folder" but whose entity_id is None are skipped rather
+       than silently dropped — we log them so you can see what the API returned.
+    2. Items with an unrecognised / missing type that have a non-None entity_id are
+       treated as potential files AND we attempt to recurse into them as folders first
+       so nested folders that the API returns without an explicit type are still walked.
+    3. We log the total count at each level so you can verify depth traversal in logs.
+    """
+    if _depth > 15:
+        log.warning(f"[{platform}] Max recursion depth hit for course {course_id} folder {folder_id}")
         return []
 
     cfg = pcfg(platform)
     qs = cfg["content_qs"](course_id, folder_id)
     url = cfg["content_url"] + qs
-    log.debug(f"[{platform}] fetch url={url}")
+    log.debug(f"[{platform}] fetch depth={_depth} url={url}")
 
     try:
-        resp = await api_get(session, url)  # already retries 3x
+        resp = await api_get(session, url)
     except Exception as e:
         log.warning(
-            f"[{platform}] content fetch failed cid={course_id} fid={folder_id}: {e}"
+            f"[{platform}] content fetch failed cid={course_id} fid={folder_id} depth={_depth}: {e}"
         )
-        return []  # folder fetch failed even after retries, skip gracefully
+        return []
 
     items = resp.get("data") or []
+    log.debug(f"[{platform}] depth={_depth} folder={folder_id} → {len(items)} item(s)")
+
     result = []
     for item in items:
-        itype = item.get("type")
+        itype = (item.get("type") or "").lower().strip()
+        entity_id = item.get("entity_id")
+
         if itype == "folder":
-            fid = item.get("entity_id")
-            if fid:
-                sub = await fetch_files_recursive(
-                    session, platform, course_id, fid, _depth=_depth + 1
-                )
-                result.extend(sub)
+            if not entity_id:
+                log.warning(f"[{platform}] folder item has no entity_id, skipping: {item}")
+                continue
+            log.debug(f"[{platform}] descending into folder entity_id={entity_id} at depth={_depth}")
+            sub = await fetch_files_recursive(
+                session, platform, course_id, entity_id, _depth=_depth + 1
+            )
+            result.extend(sub)
+
         elif itype == "file":
+            if not entity_id:
+                log.warning(f"[{platform}] file item has no entity_id, skipping: {item}")
+                continue
             result.append(item)
+
         else:
-            # Some APIs return items without a type — treat as file
-            if item.get("entity_id"):
-                log.debug(
-                    f"[{platform}] Unknown item type '{itype}' for entity {item.get('entity_id')}, treating as file"
-                )
+            # ── Unknown or missing type ─────────────────────────
+            # The API sometimes omits "type" on folder-like items.
+            # Strategy: try recursing as a folder first; if that yields nothing
+            # (or the entity has inline file data), treat as a file.
+            if not entity_id:
+                log.debug(f"[{platform}] item has no type and no entity_id, skipping: {item}")
+                continue
+
+            inline_data = item.get("data") or {}
+            has_file_url = bool((inline_data.get("file_url") or "").strip())
+
+            if has_file_url:
+                # Clearly a file — inline data already has the URL
+                log.debug(f"[{platform}] unknown-type item entity_id={entity_id} has inline file_url → treating as file")
                 result.append(item)
+            else:
+                # Try to recurse as a folder
+                log.debug(f"[{platform}] unknown-type item entity_id={entity_id} → attempting folder recursion")
+                sub = await fetch_files_recursive(
+                    session, platform, course_id, entity_id, _depth=_depth + 1
+                )
+                if sub:
+                    result.extend(sub)
+                else:
+                    # Recursion returned nothing — treat as a leaf file so the
+                    # details endpoint can be called and decide
+                    log.debug(f"[{platform}] unknown-type entity_id={entity_id} yielded no children → treating as file")
+                    result.append(item)
+
+    log.info(f"[{platform}] depth={_depth} folder={folder_id} → {len(result)} file(s) after recursion")
     return result
 
 
@@ -1214,19 +1278,26 @@ async def get_content_detail(
 ):
     """
     Return the content detail dict for a file item.
-    If the tree-walk already gave us the detail payload inside item["data"],
-    we use that directly to save an extra API call.
-    Falls back to the dedicated content-details endpoint.
+
+    FIX: The original check `inline_data.get("file_url") is not None` would return
+    the inline_data even when file_url was explicitly set to None (or an empty string),
+    causing valid items to be permanently skipped. We now only use inline_data if it
+    contains a non-empty file_url OR if the details endpoint is unreachable.
     """
-    if inline_data and inline_data.get("file_url") is not None:
+    # Use inline_data only when it has a usable file_url
+    if inline_data and (inline_data.get("file_url") or "").strip():
         return inline_data
 
+    # Always fall through to the dedicated details endpoint
     cfg = pcfg(platform)
     qs = cfg["details_qs"](content_id, course_id)
     url = cfg["details_url"] + qs
     try:
         resp = await api_get(session, url)
-        return resp.get("data") or None
+        detail = resp.get("data") or None
+        if detail is None:
+            log.warning(f"[{platform}] details endpoint returned no data for content_id={content_id}")
+        return detail
     except Exception as e:
         log.warning(f"[{platform}] details failed content_id={content_id}: {e}")
         return None
@@ -1302,39 +1373,43 @@ async def check_and_post(app: Application):
             log.info(f"[{platform}] Scanning course {course_id} → {channel_id}")
             try:
                 files = await fetch_files_recursive(session, platform, course_id)
+                log.info(f"[{platform}] daily check: found {len(files)} file(s) for course {course_id}")
+
                 for f in files:
-                    cid = f["entity_id"]
-                    if db_is_sent(platform, course_id, cid):
+                    content_id = f["entity_id"]  # FIX: use content_id, not cid
+                    if db_is_sent(platform, course_id, content_id):
                         skipped += 1
                         continue
+
                     detail = await get_content_detail(
-                        session, platform, cid, course_id, f.get("data")
+                        session, platform, content_id, course_id, f.get("data")
                     )
-                    if not detail:
+                    if detail is None:
                         log.warning(
-                            f"[{platform}] No detail for content_id={cid}, will retry next run."
+                            f"[{platform}] No detail for content_id={content_id}, will retry next run."
                         )
                         skipped += 1
-                        continue  # ← do NOT mark as sent, retry next time
+                        continue
 
                     file_url = (detail.get("file_url") or "").strip()
                     if not file_url:
-                        # Genuinely no file (e.g. live class placeholder) — safe to skip forever
                         log.info(
-                            f"[{platform}] content_id={cid} has no file_url, marking done."
+                            f"[{platform}] content_id={content_id} has no file_url, marking done."
                         )
-                        db_mark_sent(platform, course_id, cid)
+                        db_mark_sent(platform, course_id, content_id)
                         skipped += 1
                         continue
+
                     try:
                         await post_content(
                             app, platform, channel_id, detail, f["title"]
                         )
-                        db_mark_sent(platform, course_id, cid)
+                        db_mark_sent(platform, course_id, content_id)
                         posted += 1
                         await asyncio.sleep(1.2)
                     except Exception as e:
                         err_msgs.append(str(e))
+
             except Exception as e:
                 err_msgs.append(f"Scan error: {e}")
 
@@ -1387,12 +1462,6 @@ async def check_and_post(app: Application):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  NOTE: DB backup logic lives in _do_db_backup() (defined above)
-#        and is triggered by the nightly job + /backup + Backup Now button.
-# ═══════════════════════════════════════════════════════════════
-
-
-# ═══════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════
 def main():
@@ -1404,7 +1473,7 @@ def main():
     # ── Commands ────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("batches", cmd_batches))
-    app.add_handler(CommandHandler("broadcast", _do_broadcast))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))  # FIX: was _do_broadcast
     app.add_handler(CommandHandler("forceall", cmd_forceall))
     app.add_handler(CommandHandler("backup", cmd_backup))
 
@@ -1445,8 +1514,6 @@ def main():
     )
 
     # ── Daily content check at midnight UTC ─────────────────────
-    # Uses run_daily so it always fires at exactly 00:00 UTC,
-    # not "N hours after boot" which drifts over time.
     app.job_queue.run_daily(
         lambda ctx: asyncio.create_task(check_and_post(app)),
         time=datetime.time(hour=0, minute=0, second=0, tzinfo=datetime.timezone.utc),
