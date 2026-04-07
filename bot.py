@@ -571,10 +571,18 @@ async def _do_forceall(status_fn, app: Application):
                         skipped += 1
                         continue
                     detail = await get_content_detail(session, platform, cid, course_id, f.get("data"))
-                    if not detail or not (detail.get("file_url") or "").strip():
-                        db_mark_sent(platform, course_id, cid)
-                        skipped += 1
-                        continue
+                    if not detail:
+    log.warning(f"[{platform}] No detail for content_id={cid}, will retry next run.")
+    skipped += 1
+    continue  # ← do NOT mark as sent, retry next time
+
+file_url = (detail.get("file_url") or "").strip()
+if not file_url:
+    # Genuinely no file (e.g. live class placeholder) — safe to skip forever
+    log.info(f"[{platform}] content_id={cid} has no file_url, marking done.")
+    db_mark_sent(platform, course_id, cid)
+    skipped += 1
+    continue
                     await post_content(app, platform, channel_id, detail, f["title"])
                     db_mark_sent(platform, course_id, cid)
                     posted += 1
@@ -834,9 +842,18 @@ async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 if db_is_sent(platform, course_id, content_id):
                     skipped += 1; continue
                 detail = await get_content_detail(session, platform, content_id, course_id, f.get("data"))
-                if not detail or not (detail.get("file_url") or "").strip():
-                    db_mark_sent(platform, course_id, content_id)
-                    skipped += 1; continue
+                if not detail:
+    log.warning(f"[{platform}] No detail for content_id={cid}, will retry next run.")
+    skipped += 1
+    continue  # ← do NOT mark as sent, retry next time
+
+file_url = (detail.get("file_url") or "").strip()
+if not file_url:
+    # Genuinely no file (e.g. live class placeholder) — safe to skip forever
+    log.info(f"[{platform}] content_id={cid} has no file_url, marking done.")
+    db_mark_sent(platform, course_id, cid)
+    skipped += 1
+    continue
                 await post_content(ctx.application, platform, channel_id, detail, f["title"])
                 db_mark_sent(platform, course_id, content_id)
                 posted += 1
@@ -906,30 +923,22 @@ async def msg_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════
 #  CONTENT POLLER
 # ═══════════════════════════════════════════════════════════════
-async def fetch_files_recursive(session, platform, course_id, folder_id=None):
-    """
-    Recursively walk the content tree.
-
-    NT  root:   /all-content?courseid=<cid>
-    NT  folder: /all-content?courseid=<cid>&id=<fid>
-    MJ  root:   /all-content/<cid>
-    MJ  folder: /all-content/<cid>?id=<fid>
-
-    Each item in `data` may be type "folder" (recurse) or "file" (collect).
-    The file's detail payload is already inlined under item["data"], so we
-    use that directly instead of a separate details API call where possible.
-    """
-    cfg = pcfg(platform)
-    qs  = cfg["content_qs"](course_id, folder_id)   # folder_id=None → root
-    url = cfg["content_url"] + qs
-    log.debug(f"[{platform}] fetch url={url}")
-    try:
-        resp = await api_get(session, url)
-    except Exception as e:
-        log.warning(f"[{platform}] content fetch failed cid={course_id} fid={folder_id}: {e}")
+async def fetch_files_recursive(session, platform, course_id, folder_id=None, _depth=0):
+    if _depth > 10:
+        log.warning(f"[{platform}] Max recursion depth hit for course {course_id}")
         return []
 
-    # `data` can legitimately be None when a folder is empty
+    cfg = pcfg(platform)
+    qs  = cfg["content_qs"](course_id, folder_id)
+    url = cfg["content_url"] + qs
+    log.debug(f"[{platform}] fetch url={url}")
+
+    try:
+        resp = await api_get(session, url)  # already retries 3x
+    except Exception as e:
+        log.warning(f"[{platform}] content fetch failed cid={course_id} fid={folder_id}: {e}")
+        return []  # folder fetch failed even after retries, skip gracefully
+
     items = resp.get("data") or []
     result = []
     for item in items:
@@ -937,12 +946,18 @@ async def fetch_files_recursive(session, platform, course_id, folder_id=None):
         if itype == "folder":
             fid = item.get("entity_id")
             if fid:
-                sub = await fetch_files_recursive(session, platform, course_id, fid)
+                sub = await fetch_files_recursive(
+                    session, platform, course_id, fid, _depth=_depth + 1
+                )
                 result.extend(sub)
         elif itype == "file":
             result.append(item)
+        else:
+            # Some APIs return items without a type — treat as file
+            if item.get("entity_id"):
+                log.debug(f"[{platform}] Unknown item type '{itype}' for entity {item.get('entity_id')}, treating as file")
+                result.append(item)
     return result
-
 
 async def get_content_detail(session, platform, content_id, course_id, inline_data: dict | None = None):
     """
@@ -1035,9 +1050,18 @@ async def check_and_post(app: Application):
                     if db_is_sent(platform, course_id, cid):
                         skipped += 1; continue
                     detail = await get_content_detail(session, platform, cid, course_id, f.get("data"))
-                    if not detail or not (detail.get("file_url") or "").strip():
-                        db_mark_sent(platform, course_id, cid)
-                        skipped += 1; continue
+                    if not detail:
+    log.warning(f"[{platform}] No detail for content_id={cid}, will retry next run.")
+    skipped += 1
+    continue  # ← do NOT mark as sent, retry next time
+
+file_url = (detail.get("file_url") or "").strip()
+if not file_url:
+    # Genuinely no file (e.g. live class placeholder) — safe to skip forever
+    log.info(f"[{platform}] content_id={cid} has no file_url, marking done.")
+    db_mark_sent(platform, course_id, cid)
+    skipped += 1
+    continue
                     try:
                         await post_content(app, platform, channel_id, detail, f["title"])
                         db_mark_sent(platform, course_id, cid)
