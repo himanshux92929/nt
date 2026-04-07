@@ -41,7 +41,7 @@ PLAYER_BASE   = "https://smarterz.netlify.app/ntplayer"
 PLAYER_SECRET = "smarterzpro"
 
 # ── Single source of truth for API base URL ────────────────────
-API_BASE = "https://apiserver-6hat.onrender.com/api"
+API_BASE = "https://apiserver-phi-topaz.vercel.app/api"
 
 # ─── Platform definitions (built on top of API_BASE) ──────────
 PLATFORMS = {
@@ -335,6 +335,9 @@ def build_course_keyboard(courses: list, platform: str, cfg: dict) -> InlineKeyb
         InlineKeyboardButton("📡 Broadcast All",  callback_data="broadcast_prompt"),
         InlineKeyboardButton("⚡ Force All",       callback_data="forceall_confirm"),
     ])
+    keyboard.append([
+        InlineKeyboardButton("🗄️ Backup Now",     callback_data="backup_now"),
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -388,6 +391,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ], [
         InlineKeyboardButton("📡 Broadcast All", callback_data="broadcast_prompt"),
         InlineKeyboardButton("⚡ Force All",      callback_data="forceall_confirm"),
+    ], [
+        InlineKeyboardButton("🗄️ Backup Now",    callback_data="backup_now"),
     ]]
     await update.message.reply_text(
         "╔══════════════════════════╗\n"
@@ -417,8 +422,45 @@ async def cmd_batches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @owner_only
-async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/broadcast <message>"""
+async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/backup – send DB backup immediately."""
+    msg = await update.message.reply_text("🗄️ Generating backup…")
+    await _do_db_backup(ctx.application)
+    await msg.delete()
+
+
+async def cb_backup_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("🗄️ Sending backup…", show_alert=False)
+    if query.from_user.id != OWNER_ID:
+        return
+    await _do_db_backup(ctx.application)
+    await query.answer("✅ Backup sent to your DM!", show_alert=True)
+
+
+async def _do_db_backup(app: Application):
+    try:
+        csv_bytes = db_dump_csv()
+        now       = datetime.datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
+        filename  = f"db_backup_{now}.csv"
+        bio       = io.BytesIO(csv_bytes)
+        bio.name  = filename
+        await app.bot.send_document(
+            chat_id=OWNER_ID, document=bio, filename=filename,
+            caption=(
+                f"🗄️ *Database Backup*\n"
+                f"🕛 {now} UTC\n\n"
+                f"Contains: `batches` + `sent_files` tables."
+            ),
+            parse_mode="Markdown",
+        )
+        log.info("DB backup sent.")
+    except Exception as e:
+        log.error(f"DB backup failed: {e}")
+        try:
+            await app.bot.send_message(chat_id=OWNER_ID, text=f"❌ DB backup failed: {e}")
+        except Exception:
+            pass
     text = " ".join(ctx.args) if ctx.args else ""
     if not text:
         await update.message.reply_text("Usage: /broadcast <your message>")
@@ -507,8 +549,8 @@ async def _do_forceall(status_fn, app: Application):
                     if db_is_sent(platform, course_id, cid):
                         skipped += 1
                         continue
-                    detail = await get_content_detail(session, platform, cid, course_id)
-                    if not detail or not detail.get("file_url"):
+                    detail = await get_content_detail(session, platform, cid, course_id, f.get("data"))
+                    if not detail or not (detail.get("file_url") or "").strip():
                         db_mark_sent(platform, course_id, cid)
                         skipped += 1
                         continue
@@ -729,6 +771,8 @@ async def cb_cancel_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ], [
         InlineKeyboardButton("📡 Broadcast All", callback_data="broadcast_prompt"),
         InlineKeyboardButton("⚡ Force All",      callback_data="forceall_confirm"),
+    ], [
+        InlineKeyboardButton("🗄️ Backup Now",    callback_data="backup_now"),
     ]]
     await query.edit_message_text(
         "╔══════════════════════════╗\n"
@@ -768,8 +812,8 @@ async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 content_id = f["entity_id"]
                 if db_is_sent(platform, course_id, content_id):
                     skipped += 1; continue
-                detail = await get_content_detail(session, platform, content_id, course_id)
-                if not detail or not detail.get("file_url"):
+                detail = await get_content_detail(session, platform, content_id, course_id, f.get("data"))
+                if not detail or not (detail.get("file_url") or "").strip():
                     db_mark_sent(platform, course_id, content_id)
                     skipped += 1; continue
                 await post_content(ctx.application, platform, channel_id, detail, f["title"])
@@ -841,41 +885,70 @@ async def msg_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════
 #  CONTENT POLLER
 # ═══════════════════════════════════════════════════════════════
-async def fetch_files_recursive(session, platform, course_id, folder_id=0):
+async def fetch_files_recursive(session, platform, course_id, folder_id=None):
+    """
+    Recursively walk the content tree.
+
+    NT  root:   /all-content?courseid=<cid>
+    NT  folder: /all-content?courseid=<cid>&id=<fid>
+    MJ  root:   /all-content/<cid>
+    MJ  folder: /all-content/<cid>?id=<fid>
+
+    Each item in `data` may be type "folder" (recurse) or "file" (collect).
+    The file's detail payload is already inlined under item["data"], so we
+    use that directly instead of a separate details API call where possible.
+    """
     cfg = pcfg(platform)
-    qs  = cfg["content_qs"](course_id, folder_id if folder_id else None)
+    qs  = cfg["content_qs"](course_id, folder_id)   # folder_id=None → root
     url = cfg["content_url"] + qs
+    log.debug(f"[{platform}] fetch url={url}")
     try:
-        data = await api_get(session, url)
+        resp = await api_get(session, url)
     except Exception as e:
-        log.warning(f"[{platform}] content fetch failed {course_id}/{folder_id}: {e}")
+        log.warning(f"[{platform}] content fetch failed cid={course_id} fid={folder_id}: {e}")
         return []
+
+    # `data` can legitimately be None when a folder is empty
+    items = resp.get("data") or []
     result = []
-    for item in data.get("data", []):
-        if item.get("type") == "folder":
-            result.extend(await fetch_files_recursive(session, platform, course_id, item["entity_id"]))
-        elif item.get("type") == "file":
+    for item in items:
+        itype = item.get("type")
+        if itype == "folder":
+            fid = item.get("entity_id")
+            if fid:
+                sub = await fetch_files_recursive(session, platform, course_id, fid)
+                result.extend(sub)
+        elif itype == "file":
             result.append(item)
     return result
 
 
-async def get_content_detail(session, platform, content_id, course_id):
+async def get_content_detail(session, platform, content_id, course_id, inline_data: dict | None = None):
+    """
+    Return the content detail dict for a file item.
+    If the tree-walk already gave us the detail payload inside item["data"],
+    we use that directly to save an extra API call.
+    Falls back to the dedicated content-details endpoint.
+    """
+    if inline_data and inline_data.get("file_url") is not None:
+        return inline_data
+
     cfg = pcfg(platform)
     qs  = cfg["details_qs"](content_id, course_id)
     url = cfg["details_url"] + qs
     try:
-        data = await api_get(session, url)
-        return data.get("data")
+        resp = await api_get(session, url)
+        return resp.get("data") or None
     except Exception as e:
-        log.warning(f"[{platform}] details failed {content_id}: {e}")
+        log.warning(f"[{platform}] details failed content_id={content_id}: {e}")
         return None
 
 
 async def post_content(app: Application, platform, channel_id, detail, title):
-    file_url  = detail.get("file_url", "")
+    file_url  = (detail.get("file_url") or "").strip()
     file_type = detail.get("file_type")
     thumb     = (detail.get("thumbnail") or "").strip()
-    duration  = detail.get("duration", "")
+    duration  = detail.get("duration")
 
     if not file_url:
         return
@@ -884,11 +957,13 @@ async def post_content(app: Application, platform, channel_id, detail, title):
     open_url = make_player_url(file_url) if is_video else file_url
     tag      = "🎬 Video" if is_video else "📄 PDF"
 
+    # Duration only makes sense for videos
     dur_txt = ""
-    if duration:
+    if is_video and duration:
         try:
             s = int(duration)
-            dur_txt = f" • {s // 60}m {s % 60}s"
+            if s > 0:
+                dur_txt = f" • {s // 60}m {s % 60}s"
         except (ValueError, TypeError):
             pass
 
@@ -938,8 +1013,8 @@ async def check_and_post(app: Application):
                     cid = f["entity_id"]
                     if db_is_sent(platform, course_id, cid):
                         skipped += 1; continue
-                    detail = await get_content_detail(session, platform, cid, course_id)
-                    if not detail or not detail.get("file_url"):
+                    detail = await get_content_detail(session, platform, cid, course_id, f.get("data"))
+                    if not detail or not (detail.get("file_url") or "").strip():
                         db_mark_sent(platform, course_id, cid)
                         skipped += 1; continue
                     try:
@@ -994,34 +1069,9 @@ async def check_and_post(app: Application):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  MIDNIGHT DATABASE BACKUP
+#  NOTE: DB backup logic lives in _do_db_backup() (defined above)
+#        and is triggered by the nightly job + /backup + Backup Now button.
 # ═══════════════════════════════════════════════════════════════
-async def send_db_backup(app: Application):
-    log.info("Sending nightly DB backup to owner…")
-    try:
-        csv_bytes = db_dump_csv()
-        now       = datetime.datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
-        filename  = f"db_backup_{now}.csv"
-        bio = io.BytesIO(csv_bytes)
-        bio.name = filename
-        await app.bot.send_document(
-            chat_id=OWNER_ID,
-            document=bio,
-            filename=filename,
-            caption=(
-                f"🗄️ *Nightly Database Backup*\n"
-                f"🕛 {now} UTC\n\n"
-                f"Contains: `batches` + `sent_files` tables."
-            ),
-            parse_mode="Markdown",
-        )
-        log.info("DB backup sent.")
-    except Exception as e:
-        log.error(f"DB backup failed: {e}")
-        try:
-            await app.bot.send_message(chat_id=OWNER_ID, text=f"❌ DB backup failed: {e}")
-        except Exception:
-            pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1033,13 +1083,14 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands
+    # ── Commands ────────────────────────────────────────────────
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("batches",   cmd_batches))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CommandHandler("forceall",  cmd_forceall))
+    app.add_handler(CommandHandler("backup",    cmd_backup))
 
-    # Callbacks
+    # ── Callbacks ───────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(cb_noop,             pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(cb_pick,             pattern=r"^pick:(nt|mj)$"))
     app.add_handler(CallbackQueryHandler(cb_back,             pattern=r"^back:(nt|mj)$"))
@@ -1055,33 +1106,32 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_forceall_confirm, pattern=r"^forceall_confirm$"))
     app.add_handler(CallbackQueryHandler(cb_forceall_go,      pattern=r"^forceall_go$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_action,    pattern=r"^cancel_action$"))
+    app.add_handler(CallbackQueryHandler(cb_backup_now,       pattern=r"^backup_now$"))
 
-    # Free-text handler
+    # ── Free-text handler ───────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_text_handler))
 
-    # ── DB keep-alive (every 2 h) ───────────────────────────────
+    # ── DB keep-alive ping every 2 hours ────────────────────────
     app.job_queue.run_repeating(
         lambda ctx: db_ping(),
-        interval=7200, first=60,
+        interval=7200,
+        first=60,
     )
 
-    # ── Daily content check (every CHECK_INTERVAL_HOURS) ───────
-    app.job_queue.run_repeating(
+    # ── Daily content check at midnight UTC ─────────────────────
+    # Uses run_daily so it always fires at exactly 00:00 UTC,
+    # not "N hours after boot" which drifts over time.
+    app.job_queue.run_daily(
         lambda ctx: asyncio.create_task(check_and_post(app)),
-        interval=CHECK_INTERVAL_HOURS * 3600,
-        first=30,
+        time=datetime.time(hour=0, minute=0, second=0,
+                           tzinfo=datetime.timezone.utc),
     )
 
-    # ── Midnight DB backup ──────────────────────────────────────
-    # Calculate seconds until next midnight UTC
-    now_utc     = datetime.datetime.utcnow()
-    midnight    = (now_utc + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    secs_to_mid = (midnight - now_utc).total_seconds()
-
-    app.job_queue.run_repeating(
-        lambda ctx: asyncio.create_task(send_db_backup(app)),
-        interval=86400,          # every 24 h
-        first=secs_to_mid,       # start at next midnight UTC
+    # ── Nightly DB backup at 00:05 UTC ──────────────────────────
+    app.job_queue.run_daily(
+        lambda ctx: asyncio.create_task(_do_db_backup(app)),
+        time=datetime.time(hour=0, minute=5, second=0,
+                           tzinfo=datetime.timezone.utc),
     )
 
     log.info("Bot polling started.")
