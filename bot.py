@@ -312,7 +312,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def health():
-    return "OK – Bot is running hehe", 200
+    return "OK – Bot is running hehehe", 200
 
 
 @flask_app.route("/ping")
