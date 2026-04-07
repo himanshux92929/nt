@@ -266,10 +266,29 @@ def owner_only(func):
     return wrapper
 
 
-async def api_get(session: aiohttp.ClientSession, url: str) -> dict:
-    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
-        r.raise_for_status()
-        return await r.json()
+async def api_get(session: aiohttp.ClientSession, url: str, _retries: int = 3) -> dict:
+    last_exc = None
+    for attempt in range(1, _retries + 1):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                r.raise_for_status()
+                data = await r.json()
+            # Retry if API explicitly signals failure
+            if isinstance(data, dict) and data.get("success") is False:
+                log.warning(f"API returned success=false (attempt {attempt}/3): {url}")
+                if attempt < _retries:
+                    await asyncio.sleep(2 ** attempt)   # 2s, 4s back-off
+                    continue
+                raise RuntimeError(f"API success=false after {_retries} attempts: {url}")
+            return data
+        except RuntimeError:
+            raise
+        except Exception as e:
+            last_exc = e
+            log.warning(f"API error attempt {attempt}/3 [{url}]: {e}")
+            if attempt < _retries:
+                await asyncio.sleep(2 ** attempt)
+    raise last_exc
 
 
 def encode_token(url: str) -> str:
@@ -446,14 +465,16 @@ async def _do_db_backup(app: Application):
         bio       = io.BytesIO(csv_bytes)
         bio.name  = filename
         await app.bot.send_document(
-            chat_id=OWNER_ID, document=bio, filename=filename,
-            caption=(
-                f"🗄️ *Database Backup*\n"
-                f"🕛 {now} UTC\n\n"
-                f"Contains: `batches` + `sent_files` tables."
-            ),
-            parse_mode="Markdown",
-        )
+    chat_id=OWNER_ID,
+    document=bio,
+    filename=filename,
+    caption=(
+        f"🗄️ <b>Database Backup</b>\n"
+        f"🕛 {now} UTC\n\n"
+        f"Contains: <code>batches</code> + <code>sent_files</code> tables."
+    ),
+    parse_mode="HTML",          # ← was Markdown, underscores in filename broke it
+)
         log.info("DB backup sent.")
     except Exception as e:
         log.error(f"DB backup failed: {e}")
