@@ -1086,7 +1086,7 @@ def main():
     # ── Commands ────────────────────────────────────────────────
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("batches",   cmd_batches))
-    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CommandHandler("broadcast", _do_broadcast))
     app.add_handler(CommandHandler("forceall",  cmd_forceall))
     app.add_handler(CommandHandler("backup",    cmd_backup))
 
