@@ -45,7 +45,7 @@ PLAYER_BASE = "https://smarterz.netlify.app/ntplayer"
 PLAYER_SECRET = "smarterzpro"
 
 # ── Single source of truth for API base URL ────────────────────
-API_BASE = "https://apiserver-phi-topaz.vercel.app/api"
+API_BASE = "https://apiserver-jwex.onrender.com/api"
 
 # ─── Platform definitions (built on top of API_BASE) ──────────
 PLATFORMS = {
