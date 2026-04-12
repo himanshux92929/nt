@@ -443,6 +443,7 @@ def _direct_headers(platform: str) -> dict:
         bearer = os.getenv("NT_BEARER" if platform == "nt" else "MJ_BEARER", "")
     return {
         "accept": "application/json, text/plain, */*",
+        "accept-encoding": "gzip, deflate, br",
         "app_id": creds["app_id"],
         "authorization": f"Bearer {bearer}",
         "content-type": "application/json",
@@ -471,7 +472,7 @@ async def _direct_post(session: aiohttp.ClientSession, platform: str, path: str,
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as r:
                 r.raise_for_status()
-                data = await r.json()
+                data = await r.json(content_type=None)
             if isinstance(data, dict) and data.get("success") is False:
                 log.warning(f"[{platform}] POST {path} success=false (attempt {attempt}/3)")
                 if attempt < 3:
@@ -490,18 +491,23 @@ async def _direct_post(session: aiohttp.ClientSession, platform: str, path: str,
 
 
 async def _direct_get(session: aiohttp.ClientSession, platform: str, path: str, params: dict = None) -> dict:
-    """GET from course.nexttoppers.com with proper headers and retry logic."""
-    url = f"{COURSE_API_BASE}{path}"
-    headers = _direct_headers(platform)
+    """GET from course.nexttoppers.com with proper headers and retry logic.
+    Builds query string manually and uses CIMultiDict to preserve underscore header names.
+    """
+    from urllib.parse import urlencode
+    from multidict import CIMultiDict
+    base_url = f"{COURSE_API_BASE}{path}"
+    url = f"{base_url}?{urlencode(params)}" if params else base_url
+    headers = CIMultiDict(_direct_headers(platform).items())
     last_exc = None
     for attempt in range(1, 4):
         try:
             async with session.get(
-                url, params=params, headers=headers,
+                url, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as r:
                 r.raise_for_status()
-                data = await r.json()
+                data = await r.json(content_type=None)
             if isinstance(data, dict) and data.get("success") is False:
                 log.warning(f"[{platform}] GET {path} success=false (attempt {attempt}/3)")
                 if attempt < 3:
