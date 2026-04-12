@@ -852,22 +852,26 @@ async def _do_forceall(status_fn, app: Application):
                         skipped += 1
                         continue
 
-                    await post_content(app, platform, channel_id, detail, f["title"])
-                    db_mark_sent(platform, course_id, content_id)
-                    posted += 1
-                    await asyncio.sleep(1.2)
+                    try:
+                        await post_content(app, platform, channel_id, detail, f["title"])
+                        db_mark_sent(platform, course_id, content_id)
+                        posted += 1
+                        await asyncio.sleep(1.2)
+                    except Exception as post_err:
+                        log.error(f"[{platform}] forceall post failed content_id={content_id}: {post_err}")
+                        errors += 1
 
                 results.append({
                     "platform": platform, "course_id": course_id,
                     "channel_id": channel_id, "posted": posted,
-                    "skipped": skipped, "errors": 0, "ok": True,
+                    "skipped": skipped, "errors": errors, "ok": errors == 0,
                 })
             except Exception as e:
-                log.error(f"[{platform}] forceall error for course {course_id}: {e}")
+                log.error(f"[{platform}] forceall scan error for course {course_id}: {e}")
                 results.append({
                     "platform": platform, "course_id": course_id,
                     "channel_id": channel_id, "posted": posted,
-                    "skipped": skipped, "errors": 1, "ok": False, "err_msg": str(e),
+                    "skipped": skipped, "errors": errors + 1, "ok": False, "err_msg": str(e),
                 })
 
     total_posted = sum(r["posted"] for r in results)
@@ -1246,10 +1250,14 @@ async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     skipped += 1
                     continue
 
-                await post_content(ctx.application, platform, channel_id, detail, f["title"])
-                db_mark_sent(platform, course_id, content_id)
-                posted += 1
-                await asyncio.sleep(1.2)
+                try:
+                    await post_content(ctx.application, platform, channel_id, detail, f["title"])
+                    db_mark_sent(platform, course_id, content_id)
+                    posted += 1
+                    await asyncio.sleep(1.2)
+                except Exception as post_err:
+                    log.error(f"[{platform}] forceupdate post failed content_id={content_id}: {post_err}")
+                    errors += 1
 
     except Exception as e:
         log.error(f"[{platform}] force update error {course_id}: {e}")
