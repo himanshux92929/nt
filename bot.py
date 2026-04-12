@@ -63,24 +63,24 @@ COURSE_API_BASE = "https://course.nexttoppers.com/course"
 # (or hard-code below) when they do.
 NT_APP_ID  = os.getenv("NT_APP_ID",  "1770981347")
 NT_USER_ID = os.getenv("NT_USER_ID", "682065")
-NT_BEARER  = os.getenv("NT_BEARER",  "")   # set via env var
+NT_BEARER  = os.getenv("NT_BEARER",  "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo2NTMzNiwiYXBwX2lkIjoiMTc3MDk4MTM0NyIsImRldmljZV9pZCI6ImNiMzJhODk2LWI0MTAtNDY2Ni05ZTI0LWNmYTMyNzZlNjNhNyIsInBsYXRmb3JtIjoiMyIsImlhdCI6MTc3NTg5ODE3MywiZXhwIjoxNzc4NDkwMTczfQ.Dyf7Xsdz8RgANsVeihyrAVS8Ay6U5Lem-0cz0Nm2mcM")   # set via env var
 
 MJ_APP_ID  = os.getenv("MJ_APP_ID",  "1772100600")
 MJ_USER_ID = os.getenv("MJ_USER_ID", "3186295")
-MJ_BEARER  = os.getenv("MJ_BEARER",  "")   # set via env var
+MJ_BEARER  = os.getenv("MJ_BEARER",  "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjozMjk2MzE3LCJhcHBfaWQiOiIxNzcyMTAwNjAwIiwiZGV2aWNlX2lkIjoiY2IzMmE4OTYtYjQxMC00NjY2LTllMjQtY2ZhMzI3NmU2M2E3IiwicGxhdGZvcm0iOiIzIiwiaWF0IjoxNzc1ODk4MTgyLCJleHAiOjE3Nzg0OTAxODJ9.R4nl2oVHu7_KkxRC14yx8QFrA9vtNsuiK3IhLrbNMxE")   # set via env var
 
 PLATFORM_CREDS = {
     "nt": {
         "app_id":  NT_APP_ID,
         "user_id": NT_USER_ID,
-        "bearer":  NT_BEARER,
+        "authorization":  NT_BEARER,
         "origin":  "https://nexttoppers.com",
         "referer": "https://nexttoppers.com/",
     },
     "mj": {
         "app_id":  MJ_APP_ID,
         "user_id": MJ_USER_ID,
-        "bearer":  MJ_BEARER,
+        "authorization":  MJ_BEARER,
         "origin":  "https://missionjeet.in",
         "referer": "https://missionjeet.in/",
     },
