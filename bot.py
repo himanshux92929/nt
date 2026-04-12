@@ -847,8 +847,7 @@ async def _do_forceall(status_fn, app: Application):
 
                     file_url = (detail.get("file_url") or "").strip()
                     if not file_url:
-                        log.info(f"[{platform}] content_id={content_id} has no file_url, marking done.")
-                        db_mark_sent(platform, course_id, content_id)
+                        log.info(f"[{platform}] content_id={content_id} has no file_url (locked?), skipping for retry.")
                         skipped += 1
                         continue
 
@@ -1245,8 +1244,7 @@ async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
                 file_url = (detail.get("file_url") or "").strip()
                 if not file_url:
-                    log.info(f"[{platform}] content_id={content_id} has no file_url, marking done.")
-                    db_mark_sent(platform, course_id, content_id)
+                    log.info(f"[{platform}] content_id={content_id} has no file_url (locked?), skipping for retry.")
                     skipped += 1
                     continue
 
@@ -1496,9 +1494,6 @@ async def get_content_detail(
     Uses inline data if it already has a usable file_url; otherwise
     calls the direct content-details endpoint.
     """
-    if inline_data and (inline_data.get("file_url") or "").strip():
-        return inline_data
-
     return await fetch_content_details_direct(session, platform, content_id, course_id)
 
 
@@ -1597,8 +1592,7 @@ async def check_and_post(app: Application):
 
                     file_url = (detail.get("file_url") or "").strip()
                     if not file_url:
-                        log.info(f"[{platform}] content_id={content_id} has no file_url, marking done.")
-                        db_mark_sent(platform, course_id, content_id)
+                        log.info(f"[{platform}] content_id={content_id} has no file_url (locked?), skipping for retry.")
                         skipped += 1
                         continue
 
