@@ -63,7 +63,7 @@ COURSE_API_BASE = "https://course.nexttoppers.com/course"
 # (or hard-code below) when they do.
 NT_APP_ID  = os.getenv("NT_APP_ID",  "1770981347")
 NT_USER_ID = os.getenv("NT_USER_ID", "682065")
-NT_BEARER  = os.getenv("NT_BEARER",  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo2NTMzNiwiYXBwX2lkIjoiMTc3MDk4MTM0NyIsImRldmljZV9pZCI6ImNiMzJhODk2LWI0MTAtNDY2Ni05ZTI0LWNmYTMyNzZlNjNhNyIsInBsYXRmb3JtIjoiMyIsImlhdCI6MTc3NTg5ODE3MywiZXhwIjoxNzc4NDkwMTczfQ.Dyf7Xsdz8RgANsVeihyrAVS8Ay6U5Lem-0cz0Nm2mcM")
+NT_BEARER  = os.getenv("NT_BEARER",  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjozODQ4ODQzLCJhcHBfaWQiOiIxNzcwOTgxMzQ3IiwiZGV2aWNlX2lkIjoiZWQxNzc5MTktNzExZC00NGNmLTg1ZmMtZjk1MDE3NDg4ZTVmIiwicGxhdGZvcm0iOiIzIiwiaWF0IjoxNzc2MjQyOTIwLCJleHAiOjE3Nzg4MzQ5MjB9.EWK6tdSEictmYmmW2RBji5OgKMXUechHAG1Kzah0meo")
 
 MJ_APP_ID  = os.getenv("MJ_APP_ID",  "1772100600")
 MJ_USER_ID = os.getenv("MJ_USER_ID", "3186295")
