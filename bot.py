@@ -508,12 +508,15 @@ async def _direct_get(session: aiohttp.ClientSession, platform: str, path: str, 
             ) as r:
                 r.raise_for_status()
                 data = await r.json(content_type=None)
-            if isinstance(data, dict) and data.get("success") is False:
-                log.warning(f"[{platform}] GET {path} success=false (attempt {attempt}/3)")
+            if not isinstance(data, dict):
+                raise RuntimeError(f"Unexpected response type {type(data)} from {url}")
+            # Only treat as failure if success is explicitly False (bool), not missing or truthy
+            if data.get("success") is False:
+                log.warning(f"[{platform}] GET {path} success=false rc={data.get('responseCode')} (attempt {attempt}/3): {data.get('message','')}")
                 if attempt < 3:
                     await asyncio.sleep(2 ** attempt)
                     continue
-                raise RuntimeError(f"API success=false after 3 attempts: {url}")
+                raise RuntimeError(f"API success=false after 3 attempts: {url} — {data.get('message','')}")
             return data
         except RuntimeError:
             raise
@@ -862,6 +865,10 @@ async def _do_forceall(status_fn, app: Application):
                         db_mark_sent(platform, course_id, content_id)
                         posted += 1
                         await asyncio.sleep(1.2)
+                    except ValueError as ve:
+                        # Video has no duration yet — skip silently, do NOT mark sent
+                        log.info(f"[{platform}] {ve}")
+                        skipped += 1
                     except Exception as post_err:
                         log.error(f"[{platform}] forceall post failed content_id={content_id}: {post_err}")
                         errors += 1
@@ -1417,7 +1424,16 @@ async def fetch_content_details_direct(
         )
         detail = resp.get("data") or None
         if detail is None:
-            log.warning(f"[{platform}] content-details returned no data for content_id={content_id}")
+            log.warning(
+                f"[{platform}] content-details returned no data for content_id={content_id} "
+                f"rc={resp.get('responseCode')} msg={resp.get('message','')}"
+            )
+        else:
+            log.debug(
+                f"[{platform}] content-details OK content_id={content_id} "
+                f"file_type={detail.get('file_type')} duration={detail.get('duration')!r} "
+                f"file_url={'yes' if (detail.get('file_url') or '').strip() else 'NO'}"
+            )
         return detail
     except Exception as e:
         log.warning(f"[{platform}] content-details failed content_id={content_id}: {e}")
@@ -1516,6 +1532,19 @@ async def post_content(app: Application, platform, channel_id, detail, title):
         return
 
     is_video = (file_type == 2) or bool(detail.get("video_type"))
+
+    # ── Skip videos with zero / missing duration (not yet processed by platform) ──
+    if is_video:
+        try:
+            dur_secs = int(duration or 0)
+        except (ValueError, TypeError):
+            dur_secs = 0
+        if dur_secs <= 0:
+            raise ValueError(
+                f"Video content_id={detail.get('id')} has no duration ({duration!r}); "
+                "skipping post and DB mark — will retry next run."
+            )
+
     open_url = make_player_url(file_url) if is_video else file_url
     tag = "🎬 Video" if is_video else "📄 PDF"
 
@@ -1607,6 +1636,10 @@ async def check_and_post(app: Application):
                         db_mark_sent(platform, course_id, content_id)
                         posted += 1
                         await asyncio.sleep(1.2)
+                    except ValueError as ve:
+                        # Video has no duration yet — skip silently, do NOT mark sent
+                        log.info(f"[{platform}] {ve}")
+                        skipped += 1
                     except Exception as e:
                         err_msgs.append(str(e))
 
