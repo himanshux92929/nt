@@ -1,4 +1,4 @@
-"""
+ """
 bot.py – NextToppers + MissionJeet Telegram Bot
 Combined single-file bot with MySQL persistence, auto-posting, broadcast,
 force-all-update, daily logs, midnight DB backup, and beautiful UI.
