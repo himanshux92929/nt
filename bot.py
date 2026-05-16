@@ -58,29 +58,37 @@ PLAYER_SECRET = "smarterzpro"
 COURSE_API_BASE = "https://course.nexttoppers.com/course"
 
 # ── Per-platform credentials for direct API calls ─────────────
-# These are the app_id / user_id / bearer tokens from the cURL examples.
-# The bearer token will expire — update NT_BEARER / MJ_BEARER env vars
-# (or hard-code below) when they do.
+# app_id / user_id are static; bearer tokens are fetched dynamically
+# from the auth API at the start of every update session.
 NT_APP_ID  = os.getenv("NT_APP_ID",  "1770981347")
 NT_USER_ID = os.getenv("NT_USER_ID", "682065")
-NT_BEARER  = os.getenv("NT_BEARER",  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyNjU4NDc0LCJhcHBfaWQiOiIxNzcwOTgxMzQ3IiwiZGV2aWNlX2lkIjoiMTQ0N2Y0MjYtZjg4Yy00NTNkLTk0NTgtOWM2Y2ZkM2VhMDY4IiwicGxhdGZvcm0iOiIzIiwidXNlcl90eXBlIjoxLCJpYXQiOjE3Nzg4NTc0MDUsImV4cCI6MTc4MTQ0OTQwNX0.lO4tnc-Oc4DOMeuNHQey5M5KTyYgrNip0HLKrXXtnGM")
 
 MJ_APP_ID  = os.getenv("MJ_APP_ID",  "1772100600")
 MJ_USER_ID = os.getenv("MJ_USER_ID", "3186295")
-MJ_BEARER  = os.getenv("MJ_BEARER",  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjozMjQ1MDMzLCJhcHBfaWQiOiIxNzcyMTAwNjAwIiwiZGV2aWNlX2lkIjoiMTQ0N2Y0MjYtZjg4Yy00NTNkLTk0NTgtOWM2Y2ZkM2VhMDY4IiwicGxhdGZvcm0iOiIzIiwidXNlcl90eXBlIjoxLCJpYXQiOjE3Nzg4NTc2ODIsImV4cCI6MTc4MTQ0OTY4Mn0.XrQ2a-xFIP5GFy2mloA0H6lMc5v5ahuSwqdHLn7cHOo")
+
+# ── Auth token API ─────────────────────────────────────────────
+AUTH_API_URL = "https://yoursxminato-authorize.hf.space/"
+
+# Maps auth-API response keys → platform keys
+# e.g. "nexttoppers-107" → nt,  "missionjeet-151" → mj
+_AUTH_KEY_PLATFORM = {
+    "nexttoppers": "nt",
+    "missionjeet": "mj",
+}
+
+# In-memory bearer token cache  { "nt": "Bearer eyJ...", "mj": "Bearer eyJ..." }
+_bearer_cache: dict[str, str] = {}
 
 PLATFORM_CREDS = {
     "nt": {
         "app_id":  NT_APP_ID,
         "user_id": NT_USER_ID,
-        "bearer":  NT_BEARER,
         "origin":  "https://nexttoppers.com",
         "referer": "https://nexttoppers.com/",
     },
     "mj": {
         "app_id":  MJ_APP_ID,
         "user_id": MJ_USER_ID,
-        "bearer":  MJ_BEARER,
         "origin":  "https://missionjeet.in",
         "referer": "https://missionjeet.in/",
     },
@@ -435,17 +443,60 @@ def owner_only(func):
     return wrapper
 
 
+async def fetch_auth_tokens() -> bool:
+    """
+    Fetch fresh bearer tokens from the auth API and populate _bearer_cache.
+    Returns True on success, False on failure (old cache preserved on failure).
+    Maps response keys like "nexttoppers-107" -> platform "nt",
+    "missionjeet-151" -> platform "mj".
+    """
+    global _bearer_cache
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(AUTH_API_URL, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                r.raise_for_status()
+                data = await r.json(content_type=None)
+
+        new_cache: dict[str, str] = {}
+        for key, token in data.items():
+            prefix = key.split("-")[0].lower()
+            plat = _AUTH_KEY_PLATFORM.get(prefix)
+            if plat:
+                raw = token.strip()
+                new_cache[plat] = raw if raw.startswith("Bearer ") else f"Bearer {raw}"
+
+        if not new_cache:
+            log.warning("fetch_auth_tokens: response had no recognisable platform keys — keeping old cache")
+            return False
+
+        _bearer_cache.update(new_cache)
+        log.info(f"fetch_auth_tokens: updated tokens for platforms: {list(new_cache.keys())}")
+        return True
+    except Exception as e:
+        log.error(f"fetch_auth_tokens: failed to fetch tokens: {e}")
+        return False
+
+
+def _get_bearer(platform: str) -> str:
+    """Return cached bearer token; raises RuntimeError if cache is empty."""
+    token = _bearer_cache.get(platform, "")
+    if not token:
+        raise RuntimeError(
+            f"No bearer token in cache for platform '{platform}'. "
+            "fetch_auth_tokens() must be called before starting an update session."
+        )
+    return token
+
+
 def _direct_headers(platform: str) -> dict:
     """Build the HTTP headers for direct course.nexttoppers.com API calls."""
     creds = PLATFORM_CREDS[platform]
-    bearer = creds["bearer"]
-    if not bearer:
-        bearer = os.getenv("NT_BEARER" if platform == "nt" else "MJ_BEARER", "")
+    bearer = _get_bearer(platform)
     return {
         "accept": "application/json, text/plain, */*",
         "accept-encoding": "gzip, deflate, br",
         "app_id": creds["app_id"],
-        "authorization": f"Bearer {bearer.removeprefix('Bearer ').strip()}",
+        "authorization": bearer,
         "content-type": "application/json",
         "origin": creds["origin"],
         "platform": "3",
@@ -461,19 +512,32 @@ def _direct_headers(platform: str) -> dict:
 
 
 async def _direct_post(session: aiohttp.ClientSession, platform: str, path: str, body: dict) -> dict:
-    """POST to course.nexttoppers.com with proper headers and retry logic."""
+    """POST to course.nexttoppers.com with proper headers and retry logic.
+    On 401/403 automatically refreshes the auth token once and retries."""
     url = f"{COURSE_API_BASE}{path}"
-    headers = _direct_headers(platform)
     last_exc = None
     for attempt in range(1, 4):
         try:
+            headers = _direct_headers(platform)
             async with session.post(
                 url, json=body, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as r:
+                if r.status in (401, 403):
+                    log.warning(f"[{platform}] POST {path} got {r.status} — refreshing auth token")
+                    await fetch_auth_tokens()
+                    if attempt < 3:
+                        await asyncio.sleep(1)
+                        continue
+                    r.raise_for_status()
                 r.raise_for_status()
                 data = await r.json(content_type=None)
             if isinstance(data, dict) and data.get("success") is False:
+                # Also refresh token if API says unauthorised
+                msg = data.get("message", "")
+                if any(w in msg.lower() for w in ("unauthori", "token", "expired")):
+                    log.warning(f"[{platform}] POST {path} auth error in body — refreshing token")
+                    await fetch_auth_tokens()
                 log.warning(f"[{platform}] POST {path} success=false (attempt {attempt}/3)")
                 if attempt < 3:
                     await asyncio.sleep(2 ** attempt)
@@ -492,31 +556,40 @@ async def _direct_post(session: aiohttp.ClientSession, platform: str, path: str,
 
 async def _direct_get(session: aiohttp.ClientSession, platform: str, path: str, params: dict = None) -> dict:
     """GET from course.nexttoppers.com with proper headers and retry logic.
-    Builds query string manually and uses CIMultiDict to preserve underscore header names.
-    """
+    On 401/403 automatically refreshes the auth token once and retries."""
     from urllib.parse import urlencode
     from multidict import CIMultiDict
     base_url = f"{COURSE_API_BASE}{path}"
     url = f"{base_url}?{urlencode(params)}" if params else base_url
-    headers = CIMultiDict(_direct_headers(platform).items())
     last_exc = None
     for attempt in range(1, 4):
         try:
+            headers = CIMultiDict(_direct_headers(platform).items())
             async with session.get(
                 url, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as r:
+                if r.status in (401, 403):
+                    log.warning(f"[{platform}] GET {path} got {r.status} — refreshing auth token")
+                    await fetch_auth_tokens()
+                    if attempt < 3:
+                        await asyncio.sleep(1)
+                        continue
+                    r.raise_for_status()
                 r.raise_for_status()
                 data = await r.json(content_type=None)
             if not isinstance(data, dict):
                 raise RuntimeError(f"Unexpected response type {type(data)} from {url}")
-            # Only treat as failure if success is explicitly False (bool), not missing or truthy
             if data.get("success") is False:
-                log.warning(f"[{platform}] GET {path} success=false rc={data.get('responseCode')} (attempt {attempt}/3): {data.get('message','')}")
+                msg = data.get("message", "")
+                if any(w in msg.lower() for w in ("unauthori", "token", "expired")):
+                    log.warning(f"[{platform}] GET {path} auth error in body — refreshing token")
+                    await fetch_auth_tokens()
+                log.warning(f"[{platform}] GET {path} success=false rc={data.get('responseCode')} (attempt {attempt}/3): {msg}")
                 if attempt < 3:
                     await asyncio.sleep(2 ** attempt)
                     continue
-                raise RuntimeError(f"API success=false after 3 attempts: {url} — {data.get('message','')}")
+                raise RuntimeError(f"API success=false after 3 attempts: {url} — {msg}")
             return data
         except RuntimeError:
             raise
@@ -818,6 +891,15 @@ async def _do_forceall(status_fn, app: Application):
         await status_fn("⚠️ No active connected batches found.")
         return
 
+    # ── Fetch fresh auth tokens for this update session ──────────
+    await status_fn(
+        f"⚡ *Force Update – All Batches*\n"
+        f"{'─' * 28}\n"
+        f"🔑 Fetching auth tokens…",
+        parse_mode="Markdown",
+    )
+    await fetch_auth_tokens()
+
     await status_fn(
         f"⚡ *Force Update – All Batches*\n"
         f"{'─' * 28}\n"
@@ -827,7 +909,7 @@ async def _do_forceall(status_fn, app: Application):
 
     results = []
     async with aiohttp.ClientSession() as session:
-        for batch in batches:
+        for batch_idx, batch in enumerate(batches, 1):
             platform = batch["platform"]
             course_id = batch["course_id"]
             channel_id = batch["channel_id"]
@@ -836,10 +918,33 @@ async def _do_forceall(status_fn, app: Application):
 
             try:
                 files = await fetch_files_recursive(session, platform, course_id)
-                log.info(f"[{platform}] forceall: found {len(files)} file(s) for course {course_id}")
+                total_files = len(files)
+                log.info(f"[{platform}] forceall: found {total_files} file(s) for course {course_id}")
+
+                processed = 0
+                last_update = asyncio.get_event_loop().time()
 
                 for f in files:
                     content_id = f["entity_id"]
+                    processed += 1
+
+                    # ── Telegram progress update every 10 s ──────
+                    now = asyncio.get_event_loop().time()
+                    if now - last_update >= 10:
+                        bar = _progress_bar(processed, total_files)
+                        try:
+                            await status_fn(
+                                f"⚡ *Force Update – All Batches*\n"
+                                f"{'─' * 28}\n"
+                                f"Batch `{batch_idx}/{len(batches)}` — {cfg['emoji']} Course `{course_id}`\n"
+                                f"{bar}\n"
+                                f"📤 posted={posted}  ⏭ skipped={skipped}  ❌ errors={errors}",
+                                parse_mode="Markdown",
+                            )
+                        except Exception:
+                            pass
+                        last_update = now
+
                     if db_is_sent(platform, course_id, content_id):
                         skipped += 1
                         continue
@@ -866,7 +971,6 @@ async def _do_forceall(status_fn, app: Application):
                         posted += 1
                         await asyncio.sleep(1.2)
                     except ValueError as ve:
-                        # Video has no duration yet — skip silently, do NOT mark sent
                         log.info(f"[{platform}] {ve}")
                         skipped += 1
                     except Exception as post_err:
@@ -1227,6 +1331,15 @@ async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     channel_id = batch["channel_id"]
     name = course_display_name(batch)
+
+    # ── Fetch fresh auth tokens for this session ─────────────────
+    await query.edit_message_text(
+        f"{cfg['emoji']} *{cfg['label']} – {name}*\n\n"
+        f"🔑 Fetching auth tokens…",
+        parse_mode="Markdown",
+    )
+    await fetch_auth_tokens()
+
     await query.edit_message_text(
         f"{cfg['emoji']} *{cfg['label']} – {name}*\n\n"
         f"⚡ Force update running…\n📂 Fetching content list…",
@@ -1237,10 +1350,33 @@ async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         async with aiohttp.ClientSession() as session:
             files = await fetch_files_recursive(session, platform, course_id)
-            log.info(f"[{platform}] forceupdate: found {len(files)} file(s) for course {course_id}")
+            total_files = len(files)
+            log.info(f"[{platform}] forceupdate: found {total_files} file(s) for course {course_id}")
+
+            processed = 0
+            last_update = asyncio.get_event_loop().time()
 
             for f in files:
                 content_id = f["entity_id"]
+                processed += 1
+
+                # ── Live Telegram progress bar every 10 s ────────
+                now = asyncio.get_event_loop().time()
+                if now - last_update >= 10:
+                    bar = _progress_bar(processed, total_files)
+                    try:
+                        await query.edit_message_text(
+                            f"{cfg['emoji']} *{cfg['label']} – {name}*\n"
+                            f"{'─' * 30}\n"
+                            f"⚡ Force update in progress…\n\n"
+                            f"{bar}\n"
+                            f"📤 posted={posted}  ⏭ skipped={skipped}  ❌ errors={errors}",
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        pass
+                    last_update = now
+
                 if db_is_sent(platform, course_id, content_id):
                     skipped += 1
                     continue
@@ -1584,11 +1720,26 @@ async def post_content(app: Application, platform, channel_id, detail, title):
         raise
 
 
+def _progress_bar(done: int, total: int, width: int = 16) -> str:
+    """Return a text progress bar like [████░░░░] 4/10."""
+    if total == 0:
+        return f"[{'░' * width}] 0/0"
+    filled = int(width * done / total)
+    bar = "█" * filled + "░" * (width - filled)
+    pct = int(100 * done / total)
+    return f"[{bar}] {done}/{total} ({pct}%)"
+
+
 # ═══════════════════════════════════════════════════════════════
 #  SCHEDULED DAILY CHECK + LOGS
 # ═══════════════════════════════════════════════════════════════
 async def check_and_post(app: Application):
     log.info("=== Daily content check started ===")
+
+    # ── Fetch fresh auth tokens for this update session ──────────
+    log.info("Fetching auth tokens for daily check session…")
+    await fetch_auth_tokens()
+
     batches = db_get_all_active_batches()
     if not batches:
         log.info("No active batches.")
@@ -1607,10 +1758,27 @@ async def check_and_post(app: Application):
             log.info(f"[{platform}] Scanning course {course_id} → {channel_id}")
             try:
                 files = await fetch_files_recursive(session, platform, course_id)
-                log.info(f"[{platform}] daily check: found {len(files)} file(s) for course {course_id}")
+                total_files = len(files)
+                log.info(f"[{platform}] daily check: found {total_files} file(s) for course {course_id}")
+
+                # ── Progress tracking ────────────────────────────
+                processed = 0
+                last_progress_log = asyncio.get_event_loop().time()
 
                 for f in files:
                     content_id = f["entity_id"]
+                    processed += 1
+
+                    # Log progress every 10 seconds
+                    now = asyncio.get_event_loop().time()
+                    if now - last_progress_log >= 10:
+                        bar = _progress_bar(processed, total_files)
+                        log.info(
+                            f"[{platform}] daily check course {course_id} progress: "
+                            f"{bar} | posted={posted} skipped={skipped}"
+                        )
+                        last_progress_log = now
+
                     if db_is_sent(platform, course_id, content_id):
                         skipped += 1
                         continue
@@ -1637,11 +1805,15 @@ async def check_and_post(app: Application):
                         posted += 1
                         await asyncio.sleep(1.2)
                     except ValueError as ve:
-                        # Video has no duration yet — skip silently, do NOT mark sent
                         log.info(f"[{platform}] {ve}")
                         skipped += 1
                     except Exception as e:
                         err_msgs.append(str(e))
+
+                log.info(
+                    f"[{platform}] daily check course {course_id} done: "
+                    f"{_progress_bar(processed, total_files)} | posted={posted} skipped={skipped}"
+                )
 
             except Exception as e:
                 err_msgs.append(f"Scan error: {e}")
