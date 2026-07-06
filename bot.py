@@ -17,13 +17,12 @@ CHANGES vs previous version:
 import os
 import io
 import csv
+import json
 import asyncio
 import logging
 import threading
 import base64
 import datetime
-import json
-import subprocess
 from urllib.parse import quote
 
 import aiohttp
@@ -55,11 +54,6 @@ WATERMARK = "\n\n<i>Provided by @smartrz</i>"
 
 PLAYER_BASE = "https://smarterz.netlify.app/ntplayer"
 PLAYER_SECRET = "smarterzpro"
-
-# ── Node.js Decryption Script ──────────────────────────────────
-# Path to the Node.js script that decrypts payload
-# Set via environment variable DECRYPT_SCRIPT_PATH
-DECRYPT_SCRIPT_PATH = os.getenv("DECRYPT_SCRIPT_PATH", "/decrypt.js")
 
 # ── Direct API base (course.nexttoppers.com) ───────────────────
 COURSE_API_BASE = "https://course.nexttoppers.com/course"
@@ -1550,56 +1544,6 @@ async def fetch_all_content(
 # ═══════════════════════════════════════════════════════════════
 #  DIRECT API – CONTENT-DETAILS  (GET to course.nexttoppers.com)
 # ═══════════════════════════════════════════════════════════════
-def run_node_decryption(encrypted_payload: str) -> dict | None:
-    """
-    Execute Node.js script to decrypt the encrypted payload.
-    Requires DECRYPT_SCRIPT_PATH environment variable to be set.
-    
-    Args:
-        encrypted_payload: The encrypted string data from API
-        
-    Returns:
-        Decrypted data as dict if successful, None otherwise
-    """
-    if not DECRYPT_SCRIPT_PATH:
-        log.warning("DECRYPT_SCRIPT_PATH not configured; cannot decrypt payload")
-        return None
-    
-    if not os.path.exists(DECRYPT_SCRIPT_PATH):
-        log.warning(f"Decryption script not found: {DECRYPT_SCRIPT_PATH}")
-        return None
-    
-    try:
-        # Run Node.js script with the encrypted payload as argument
-        result = subprocess.run(
-            ["node", DECRYPT_SCRIPT_PATH, encrypted_payload],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        
-        if result.returncode != 0:
-            log.warning(
-                f"Node.js decryption script failed with rc={result.returncode}: {result.stderr}"
-            )
-            return None
-        
-        # Parse the decrypted JSON output
-        decrypted_data = json.loads(result.stdout.strip())
-        log.debug(f"Successfully decrypted payload, got dict with keys: {list(decrypted_data.keys())}")
-        return decrypted_data
-        
-    except json.JSONDecodeError as e:
-        log.warning(f"Decrypted output is not valid JSON: {e}")
-        return None
-    except subprocess.TimeoutExpired:
-        log.warning("Node.js decryption script timed out (10s)")
-        return None
-    except Exception as e:
-        log.warning(f"Node.js decryption failed: {e}")
-        return None
-
-
 async def fetch_content_details_direct(
     session: aiohttp.ClientSession,
     platform: str,
@@ -1609,60 +1553,63 @@ async def fetch_content_details_direct(
     """
     GET /course/content-details?content_id=X&course_id=Y
     Returns the data dict or None.
-    Handles both normal dict responses and encrypted string payloads.
     """
     try:
         resp = await _direct_get(
             session, platform, "/content-details",
             params={"content_id": content_id, "course_id": course_id},
         )
+
+        if resp.get("responseCode") == 3025:
+            raw_data = resp.get("data")
+            if not raw_data:
+                log.warning(
+                    f"[{platform}] content-details rc=3025 but no 'data' field for content_id={content_id}"
+                )
+                return None
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "python", "decrypt.py", str(raw_data),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    log.warning(
+                        f"[{platform}] decrypt.py failed content_id={content_id}: "
+                        f"{stderr.decode(errors='ignore').strip()}"
+                    )
+                    return None
+                detail = json.loads(stdout.decode(errors="ignore").strip())
+            except Exception as e:
+                log.warning(f"[{platform}] decrypt.py invocation error content_id={content_id}: {e}")
+                return None
+
+            if detail:
+                log.debug(
+                    f"[{platform}] content-details (decrypted) OK content_id={content_id} "
+                    f"file_type={detail.get('file_type')} duration={detail.get('duration')!r} "
+                    f"file_url={'yes' if (detail.get('file_url') or '').strip() else 'NO'}"
+                )
+            else:
+                log.warning(
+                    f"[{platform}] decrypt.py returned no usable data for content_id={content_id}"
+                )
+            return detail
+
         detail = resp.get("data") or None
-        
         if detail is None:
             log.warning(
                 f"[{platform}] content-details returned no data for content_id={content_id} "
                 f"rc={resp.get('responseCode')} msg={resp.get('message','')}"
             )
-            return None
-        
-        # ── Check if detail is a dict (normal response) ──────────────
-        if isinstance(detail, dict):
+        else:
             log.debug(
                 f"[{platform}] content-details OK content_id={content_id} "
                 f"file_type={detail.get('file_type')} duration={detail.get('duration')!r} "
                 f"file_url={'yes' if (detail.get('file_url') or '').strip() else 'NO'}"
             )
-            return detail
-        
-        # ── Handle encrypted/non-dict response ──────────────────────
-        log.warning(
-            f"[{platform}] content-details returned non-dict data for content_id={content_id} "
-            f"course_id={course_id} data_type={type(detail).__name__} "
-            f"data_value={str(detail)[:100]}... "
-            f"rc={resp.get('responseCode')} msg='Content Details'"
-        )
-        
-        # ── Attempt to decrypt if it's a string ────────────────────
-        if isinstance(detail, str):
-            log.info(
-                f"[{platform}] Attempting Node.js decryption for encrypted payload "
-                f"(content_id={content_id}, course_id={course_id})"
-            )
-            decrypted = run_node_decryption(detail)
-            if decrypted and isinstance(decrypted, dict):
-                log.info(
-                    f"[{platform}] Successfully decrypted content_id={content_id}; "
-                    f"got keys: {list(decrypted.keys())}"
-                )
-                return decrypted
-            else:
-                log.warning(
-                    f"[{platform}] Decryption failed or returned non-dict for content_id={content_id}"
-                )
-                return None
-        
-        return None
-        
+        return detail
     except Exception as e:
         log.warning(f"[{platform}] content-details failed content_id={content_id}: {e}")
         return None
