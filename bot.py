@@ -59,7 +59,7 @@ PLAYER_SECRET = "smarterzpro"
 # ── Node.js Decryption Script ──────────────────────────────────
 # Path to the Node.js script that decrypts payload
 # Set via environment variable DECRYPT_SCRIPT_PATH
-DECRYPT_SCRIPT_PATH = os.getenv("DECRYPT_SCRIPT_PATH", /decrypt.js)
+DECRYPT_SCRIPT_PATH = os.getenv("DECRYPT_SCRIPT_PATH", "/decrypt.js")
 
 # ── Direct API base (course.nexttoppers.com) ───────────────────
 COURSE_API_BASE = "https://course.nexttoppers.com/course"
