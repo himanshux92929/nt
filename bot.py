@@ -422,10 +422,13 @@ def start_flask():
 # ═══════════════════════════════════════════════════════════════
 #  LOGGING
 # ═══════════════════════════════════════════════════════════════
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s"
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
 )
 log = logging.getLogger(__name__)
+log.info(f"Logging initialized at level {_LOG_LEVEL}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1558,21 +1561,40 @@ async def fetch_content_details_direct(
             session, platform, "/content-details",
             params={"content_id": content_id, "course_id": course_id},
         )
-        detail = resp.get("data") or None
-        if detail is None:
+        raw = resp.get("data")
+
+        if raw is None or raw == "":
             log.warning(
                 f"[{platform}] content-details returned no data for content_id={content_id} "
-                f"rc={resp.get('responseCode')} msg={resp.get('message','')}"
+                f"course_id={course_id} rc={resp.get('responseCode')} msg={resp.get('message','')!r} "
+                f"full_resp={resp!r}"
             )
-        else:
-            log.debug(
-                f"[{platform}] content-details OK content_id={content_id} "
-                f"file_type={detail.get('file_type')} duration={detail.get('duration')!r} "
-                f"file_url={'yes' if (detail.get('file_url') or '').strip() else 'NO'}"
+            return None
+
+        if not isinstance(raw, dict):
+            # The API sometimes returns `data` as a string (an error message,
+            # a bare status, etc.) instead of the expected object. Treat this
+            # the same as "no detail" but log everything needed to diagnose
+            # *why*, since this used to crash with an AttributeError instead.
+            log.warning(
+                f"[{platform}] content-details returned non-dict data for content_id={content_id} "
+                f"course_id={course_id} data_type={type(raw).__name__} data_value={raw!r} "
+                f"rc={resp.get('responseCode')} msg={resp.get('message','')!r}"
             )
+            return None
+
+        detail = raw
+        log.debug(
+            f"[{platform}] content-details OK content_id={content_id} "
+            f"file_type={detail.get('file_type')} duration={detail.get('duration')!r} "
+            f"file_url={'yes' if (detail.get('file_url') or '').strip() else 'NO'}"
+        )
         return detail
     except Exception as e:
-        log.warning(f"[{platform}] content-details failed content_id={content_id}: {e}")
+        log.warning(
+            f"[{platform}] content-details failed content_id={content_id} course_id={course_id}: "
+            f"{type(e).__name__}: {e}"
+        )
         return None
 
 
