@@ -148,21 +148,28 @@ def decrypt_with_logging(base64_ciphertext, content_id=None, course=None, logger
 
 
 def main():
+    # NOTE: this is invoked as a subprocess by bot.py, which does
+    # json.loads(stdout) directly. stdout must therefore contain ONLY
+    # the raw JSON on success — no banners, no pretty-printing, no
+    # emoji lines. Anything human-readable (diagnostics, errors) goes
+    # to stderr instead, so bot.py's stderr-based logging still works.
     if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} \"<base64_ciphertext>\"")
-        sys.exit(1)
+        print("Usage: decrypt.py \"<base64_ciphertext>\"", file=sys.stderr)
+        sys.exit(2)  # exit code 2 = bad invocation (argc)
 
     ciphertext = sys.argv[1]
     try:
         result = decrypt_content_details(ciphertext)
-        print("✅ Decryption succeeded:\n")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        # stdout: machine-readable JSON only, compact (no indent needed
+        # for a subprocess pipe, but harmless either way)
+        print(json.dumps(result, ensure_ascii=False))
+        sys.exit(0)
     except DecryptDiagnosticError as err:
-        print(f"❌ Decryption failed with diagnostics:\n{err}\n")
-        sys.exit(1)
+        print(str(err), file=sys.stderr)
+        sys.exit(1)  # exit code 1 = diagnosed decrypt/parse failure
     except Exception as err:
-        print(f"❌ Unexpected error: {err}\n")
-        sys.exit(1)
+        print(f"Unexpected error: {err}", file=sys.stderr)
+        sys.exit(3)  # exit code 3 = unexpected/unhandled failure
 
 
 if __name__ == "__main__":
