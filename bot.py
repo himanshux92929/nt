@@ -1568,19 +1568,47 @@ async def fetch_content_details_direct(
                 )
                 return None
             try:
+                log.debug(
+                    f"[{platform}] decrypt.py invoking content_id={content_id} "
+                    f"raw_data_len={len(str(raw_data))}"
+                )
                 proc = await asyncio.create_subprocess_exec(
                     "python", "decrypt.py", str(raw_data),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, stderr = await proc.communicate()
+                stdout_text = stdout.decode(errors="ignore").strip()
+                stderr_text = stderr.decode(errors="ignore").strip()
+
                 if proc.returncode != 0:
+                    # exit codes from decrypt.py: 1=diagnosed decrypt/parse
+                    # failure, 2=bad invocation (argc), 3=unexpected error
+                    reason = {1: "diagnosed failure", 2: "bad invocation", 3: "unexpected error"}.get(
+                        proc.returncode, f"unknown exit code {proc.returncode}"
+                    )
                     log.warning(
-                        f"[{platform}] decrypt.py failed content_id={content_id}: "
-                        f"{stderr.decode(errors='ignore').strip()}"
+                        f"[{platform}] decrypt.py failed content_id={content_id} "
+                        f"rc={proc.returncode} ({reason}): {stderr_text or '<no stderr>'}"
                     )
                     return None
-                detail = json.loads(stdout.decode(errors="ignore").strip())
+
+                if not stdout_text:
+                    log.warning(
+                        f"[{platform}] decrypt.py exited 0 but produced empty stdout "
+                        f"content_id={content_id} stderr={stderr_text or '<none>'}"
+                    )
+                    return None
+
+                try:
+                    detail = json.loads(stdout_text)
+                except json.JSONDecodeError as je:
+                    log.warning(
+                        f"[{platform}] decrypt.py stdout was not valid JSON "
+                        f"content_id={content_id}: {je}. "
+                        f"stdout_preview={stdout_text[:120]!r} stderr={stderr_text or '<none>'}"
+                    )
+                    return None
             except Exception as e:
                 log.warning(f"[{platform}] decrypt.py invocation error content_id={content_id}: {e}")
                 return None
