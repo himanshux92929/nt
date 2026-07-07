@@ -967,13 +967,13 @@ async def _do_forceall(status_fn, app: Application):
                         continue
 
                     try:
-                        await post_content(app, platform, channel_id, detail, f["title"])
-                        db_mark_sent(platform, course_id, content_id)
-                        posted += 1
-                        await asyncio.sleep(1.2)
-                    except ValueError as ve:
-                        log.info(f"[{platform}] {ve}")
-                        skipped += 1
+                        ok = await post_content(app, platform, channel_id, detail, f["title"])
+                        if ok:
+                            db_mark_sent(platform, course_id, content_id)
+                            posted += 1
+                            await asyncio.sleep(1.2)
+                        else:
+                            skipped += 1
                     except Exception as post_err:
                         log.error(f"[{platform}] forceall post failed content_id={content_id}: {post_err}")
                         errors += 1
@@ -1399,10 +1399,15 @@ async def cb_forceupdate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 try:
-                    await post_content(ctx.application, platform, channel_id, detail, f["title"])
-                    db_mark_sent(platform, course_id, content_id)
-                    posted += 1
-                    await asyncio.sleep(1.2)
+                    ok = await post_content(ctx.application, platform, channel_id, detail, f["title"])
+                    if ok:
+                        db_mark_sent(platform, course_id, content_id)
+                        posted += 1
+                        await asyncio.sleep(1.2)
+                    else:
+                        # post_content already logged the specific skip reason
+                        # (e.g. zero duration, missing file_url) — not a real error.
+                        skipped += 1
                 except Exception as post_err:
                     log.error(f"[{platform}] forceupdate post failed content_id={content_id}: {post_err}")
                     errors += 1
@@ -1732,7 +1737,7 @@ async def post_content(app: Application, platform, channel_id, detail, title):
     duration = detail.get("duration")
 
     if not file_url:
-        return
+        return False
 
     is_video = (file_type == 2) or bool(detail.get("video_type"))
 
@@ -1743,10 +1748,11 @@ async def post_content(app: Application, platform, channel_id, detail, title):
         except (ValueError, TypeError):
             dur_secs = 0
         if dur_secs <= 0:
-            raise ValueError(
-                f"Video content_id={detail.get('id')} has no duration ({duration!r}); "
+            log.info(
+                f"[{platform}] Video content_id={detail.get('id')} has no duration ({duration!r}); "
                 "skipping post and DB mark — will retry next run."
             )
+            return False  # signals "not posted, do not mark sent, retry later"
 
     open_url = make_player_url(file_url) if is_video else file_url
     tag = "🎬 Video" if is_video else "📄 PDF"
@@ -1785,6 +1791,8 @@ async def post_content(app: Application, platform, channel_id, detail, title):
     except Exception as e:
         log.error(f"[{platform}] post failed → channel {channel_id}: {e}")
         raise
+
+    return True
 
 
 def _progress_bar(done: int, total: int, width: int = 16) -> str:
@@ -1867,13 +1875,13 @@ async def check_and_post(app: Application):
                         continue
 
                     try:
-                        await post_content(app, platform, channel_id, detail, f["title"])
-                        db_mark_sent(platform, course_id, content_id)
-                        posted += 1
-                        await asyncio.sleep(1.2)
-                    except ValueError as ve:
-                        log.info(f"[{platform}] {ve}")
-                        skipped += 1
+                        ok = await post_content(app, platform, channel_id, detail, f["title"])
+                        if ok:
+                            db_mark_sent(platform, course_id, content_id)
+                            posted += 1
+                            await asyncio.sleep(1.2)
+                        else:
+                            skipped += 1
                     except Exception as e:
                         err_msgs.append(str(e))
 
