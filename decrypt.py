@@ -114,6 +114,39 @@ def decrypt_content_details(base64_ciphertext, content_id=None):
         ) from e
 
 
+def decrypt_with_logging(base64_ciphertext, content_id=None, course=None, logger_=None):
+    """
+    Wrapper matching the existing call-site logging pattern
+    (e.g. "decrypt.py invocation error content_id=... (course=...)").
+
+    Instead of logging a generic "No detail for content_id=X, will retry",
+    this logs the specific DecryptDiagnosticError reason, so each failure
+    in the logs says WHY (empty ciphertext, bad length, key/IV mismatch,
+    empty plaintext, bad utf-8, or bad JSON) rather than just "no detail".
+
+    Returns the parsed JSON dict on success, or None on failure (after logging).
+    Use this in place of a bare try/except around decrypt_content_details
+    at call sites that currently log "No detail for content_id=... will retry".
+    """
+    log = logger_ or logger
+    try:
+        return decrypt_content_details(base64_ciphertext, content_id=content_id)
+    except DecryptDiagnosticError as err:
+        course_str = f" (course={course})" if course is not None else ""
+        log.warning(
+            "decrypt.py invocation error content_id=%s%s: %s",
+            content_id, course_str, err
+        )
+        return None
+    except Exception as err:
+        course_str = f" (course={course})" if course is not None else ""
+        log.warning(
+            "decrypt.py invocation error content_id=%s%s: unexpected error: %s",
+            content_id, course_str, err
+        )
+        return None
+
+
 def main():
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} \"<base64_ciphertext>\"")
