@@ -68,7 +68,7 @@ MJ_APP_ID  = os.getenv("MJ_APP_ID",  "1772100600")
 MJ_USER_ID = os.getenv("MJ_USER_ID", "3186295")
 
 # ── Auth token API ─────────────────────────────────────────────
-AUTH_API_URL = "https://yoursxminato-authorize.hf.space/"
+AUTH_API_URL = "https://nt-bearer.vercel.app/api"
 
 # Maps auth-API response keys → platform keys
 # e.g. "nexttoppers-107" → nt,  "missionjeet-151" → mj
